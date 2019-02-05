@@ -33,7 +33,7 @@
 			cypress_pins: cypress_pins {
 				brcm,pins = <27>; // interrupt
 				brcm,function = <0>; // in
-				brcm,pull = <2>; // pull-down?
+				brcm,pull = <1>; // pull-down?
 			};
 		};
 	};

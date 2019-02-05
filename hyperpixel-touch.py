@@ -273,10 +273,11 @@ log("HyperPixel Touch daemon running...")
 
 try:
     while True:
+	log ("Int={}".format(gpio.input(INT) ); 
         if gpio.input(INT) or touch_one_start or touch_two_start:
             smbus_read_touch()
 
-        time.sleep(0.003)
+        time.sleep(0.100)
 
 except KeyboardInterrupt:
     pass
