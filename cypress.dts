@@ -31,9 +31,9 @@
 		target = <&gpio>;
 		__overlay__ {
 			cypress_pins: cypress_pins {
-				brcm,pins = <27>; // interrupt
-				brcm,function = <0>; // in
-				brcm,pull = <1>; // pull-down?
+				brcm,pins = <27 26 18 >; // interrupt
+				brcm,function = <0 1 1>; // in out out
+				brcm,pull = <1 0 0>; // pull-down, none, none?
 			};
 		};
 	};
@@ -69,11 +69,15 @@
                 pinctrl-0 = <&cypress_pins &dpi18_pins>;
                 interrupt-parent = <&gpio>;
                 interrupts = <27 2>;
-                irq-gpios = <&gpio 27 0>; // specify  GPIO27 as the irq line from the TS controller
+                irq-gpios  = <&gpio 27 0>; // specify  GPIO27 as the irq line from the TS controller, CLK from LCD
+                mosi-gpios = <&gpio 26 0>; // specify  GPIO26 as the mosi line from the LCD controller
+                cs-gpios   = <&gpio 18 0>; // specify  GPIO27 as the cs line from the LCD controller
                 touchscreen-size-x = <800>;
                 touchscreen-size-y = <480>;
                 touchscreen-x-mm = <68>;
                 touchscreen-y-mm = <46>;
+                touchscreen-refresh-rate = <17>;
+
             };
         };
     };
@@ -107,4 +111,14 @@
             status = "disabled";
         };
     };
+
+	__overrides__ {
+        x-invert = <&cy8c20466>, "touchscreen-inverted-x:0";
+        y-invert = <&cy8c20466>, "touchscreen-inverted-y:0";
+        xy-swap  = <&cy8c20466>, "touchscreen-swapped-x-y:0";
+        x-size   = <&cy8c20466>, "touchscreen-size-x:0";
+        y-size   = <&cy8c20466>, "touchscreen-size-y:0";
+        x2y      = <&cy8c20466>, "touchscreen-x2y:0";
+        refresh-rate = <&cy8c20466>, "touchscreen-refresh-rate:0";
+	};
 };

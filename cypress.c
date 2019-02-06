@@ -9,12 +9,21 @@
  */
 
 #define DEBUG
-#define TESTING 0
 
 /*
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
  * Software Foundation; version 2 of the License.
+ */
+
+/* DTparameters:
+ *        x-invert     = <&cy8c20466>, "touchscreen-inverted-x:0";
+ *        y-invert     = <&cy8c20466>, "touchscreen-inverted-y:0";
+ *        xy-swap      = <&cy8c20466>, "touchscreen-swapped-x-y:0";
+ *        x-size       = <&cy8c20466>, "touchscreen-size-x:0";
+ *        y-size       = <&cy8c20466>, "touchscreen-size-y:0";
+ *        x2y          = <&cy8c20466>, "touchscreen-x2y:0";         //Determines order of inversion vs swapping (?)
+ *        refresh-rate = <&cy8c20466>, "touchscreen-refresh-rate:0";
  */
 
 #include <linux/kernel.h>
@@ -34,40 +43,49 @@
 #include <linux/of.h>
 #include <asm/unaligned.h>
 #include <linux/jiffies.h>
+#include <linux/delay.h>
 
 /////////////////////////////// DEFINITIONS ////////////////////////////////
 
-#define CYPRESS_GPIO_INT_NAME        "irq"
-#define CYPRESS_MAX_WIDTH        800
-#define CYPRESS_MAX_HEIGHT        480
+#define uDELAY 100 // clock pulse time in microseconds
+#define mWAIT  120  // wait time in milliseconds
 
-#define CYPRESS_FIXED1 0x30
-#define CYPRESS_FIXED2 0x70
+#define CYPRESS_GPIO_INT_NAME       "irq"
+#define CYPRESS_GPIO_MOSI_NAME      "mosi"
+#define CYPRESS_GPIO_CS_NAME        "cs"
+
+#define CYPRESS_MAX_WIDTH           800
+#define CYPRESS_MAX_HEIGHT          480
+
+#define CYPRESS_FIXED1              0x30
+#define CYPRESS_FIXED2              0x70
 
 const u8 fixed1[16] = {0xe0, 0x00, 0x01, 0x04, 0x04, 0x3c, 0x53, 0x78, 0x78, 0x00, 0x01, 0x00, 0x00, 0x0c, 0x14, 0x00}; 
 const u8 fixed2[16] = {0xa0, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x23, 0x50, 0x13, 0x01, 0x00, 0x00};
 
 struct cypress_ts_data {
-    struct i2c_client *client;
-    struct input_dev *input_dev;
-    struct gpio_desc *gpiod_int;
+    struct i2c_client  *client;
+    struct input_dev   *input_dev;
+    struct gpio_desc   *gpiod_int;
+    struct gpio_desc   *gpiod_mosi;
+    struct gpio_desc   *gpiod_cs;
+    struct task_struct *thread;
     u16 id;
     u16 version;
-    struct task_struct    *thread;
-
+    int abs_x_max;
+    int abs_y_max;
+    //instance data
     int last_x1;
     int last_y1;
     int last_x2;
     int last_y2;
     int last_numTouches;
-    int abs_x_max;
-    int abs_y_max;
     //Configuration parameters
     bool X2Y;
     bool requestedX2Y;
     u16  requestedXSize;
     u16  requestedYSize;
-    u8     requestedRefreshRate;
+    u8   requestedRefreshRate;
     bool swapped_x_y;
     bool inverted_x;
     bool inverted_y;
@@ -116,6 +134,8 @@ static int cypress_i2c_write(struct i2c_client *client, u16 reg, const u8 *buf,
 
 static void cypress_ts_process_coords(struct cypress_ts_data *ts, u16 x1, u16 y1,u16 x2, u16 y2, u8 numTouches) 
 {
+    int output;
+
     /* Adjust coordinates to screen rotation */
     if(!ts->X2Y)
     {
@@ -135,85 +155,107 @@ static void cypress_ts_process_coords(struct cypress_ts_data *ts, u16 x1, u16 y1
             swap(x1, y1);
     }
 
+    output=0;
     if (numTouches)
     {
-        input_mt_slot(ts->input_dev, 0);
         if (!ts->last_numTouches)
         {
             /* new 1 press */
+            
+            output |= 1;
+            input_mt_slot(ts->input_dev, 0);
             input_report_abs(ts->input_dev, ABS_MT_TRACKING_ID, 0);
+
+        	input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, true);
             input_report_abs(ts->input_dev, ABS_MT_POSITION_X, x1);
             input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, y1);
             input_report_key(ts->input_dev, BTN_TOUCH, 1);
             input_report_abs(ts->input_dev, ABS_X, x1);
             input_report_abs(ts->input_dev, ABS_Y, y1);
-            dev_dbg( &ts->client->dev, "Press 1");
         }
         else
         {
             /* Contact moved? */
-            if (x1 != ts->last_x1)
-                input_report_abs(ts->input_dev, ABS_X, x1);
-            if (y1 != ts->last_y1)
-                input_report_abs(ts->input_dev, ABS_Y, y1);
-            input_report_abs(ts->input_dev, ABS_MT_POSITION_X, x1);
-            input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, y1);
-            dev_dbg( &ts->client->dev, "Move 1: (%d,%d)",x1,y1);
+            if ((x1 != ts->last_x1) || (y1 != ts->last_y1))
+            {
+                output |= 1;
+                input_mt_slot(ts->input_dev, 0);
 
+                input_report_abs(ts->input_dev, ABS_MT_TRACKING_ID, 0);
+            	input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, true);
+                if (x1 != ts->last_x1)
+                    input_report_abs(ts->input_dev, ABS_X, x1);
+                if (y1 != ts->last_y1)
+                    input_report_abs(ts->input_dev, ABS_Y, y1);
+                input_report_abs(ts->input_dev, ABS_MT_POSITION_X, x1);
+                input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, y1);
+            }
         }
-        input_sync(ts->input_dev);
     }
-    if (ts->last_numTouches && !numTouches)
+    else if (ts->last_numTouches) //!numTouches
     {
         /* new 1 release */
+        output |= 1;
         input_mt_slot(ts->input_dev, 0);
+
         input_report_abs(ts->input_dev, ABS_MT_TRACKING_ID, -1);
+       	input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, false);
         input_report_key(ts->input_dev, BTN_TOUCH, 0);
-        input_sync(ts->input_dev);
-        dev_dbg( &ts->client->dev, "Release 1");
     }
 
     if (numTouches==2)
     {
-        input_mt_slot(ts->input_dev, 1);
         if (ts->last_numTouches<2)
         {
             /* new 2 press */
+            output |= 2;
+            input_mt_slot(ts->input_dev, 1);
+
             input_report_abs(ts->input_dev, ABS_MT_TRACKING_ID, 1);
+        	input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, true);
             input_report_abs(ts->input_dev, ABS_MT_POSITION_X, x2);
             input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, y2);
             input_report_key(ts->input_dev, BTN_TOUCH, 1);
             input_report_abs(ts->input_dev, ABS_X, x2);
             input_report_abs(ts->input_dev, ABS_Y, y2);
-            dev_dbg( &ts->client->dev, "Press 2");
         }
         else
         {
             /* Contact moved? */
-            if (x2 != ts->last_x2)
-                input_report_abs(ts->input_dev, ABS_X, x2);
-            if (y2 != ts->last_y2)
-                input_report_abs(ts->input_dev, ABS_Y, y2);
-            input_report_abs(ts->input_dev, ABS_MT_POSITION_X, x2);
-            input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, y2);
-            dev_dbg( &ts->client->dev, "Move 2: (%d,%d)",x2,y2);
+            if ((x2 != ts->last_x2) || (y2 != ts->last_y2))
+            {
+                output |= 2;
+                input_mt_slot(ts->input_dev, 1);
+
+                input_report_abs(ts->input_dev, ABS_MT_TRACKING_ID, 1);
+            	input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, true);
+                if (x2 != ts->last_x2)
+                    input_report_abs(ts->input_dev, ABS_X, x2);
+                if (y2 != ts->last_y2)
+                    input_report_abs(ts->input_dev, ABS_Y, y2);
+                input_report_abs(ts->input_dev, ABS_MT_POSITION_X, x2);
+                input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, y2);
+            }
         }
-        input_sync(ts->input_dev);
     }
-    if ((ts->last_numTouches==2) && (numTouches<2))
+    else if (ts->last_numTouches==2) // (numTouches<2))
     {
         /* new 2 release */
+        output |= 2;
         input_mt_slot(ts->input_dev, 1);
+
         input_report_abs(ts->input_dev, ABS_MT_TRACKING_ID, -1);
+       	input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, false);
         input_report_key(ts->input_dev, BTN_TOUCH, 0);
-        input_sync(ts->input_dev);
-        dev_dbg( &ts->client->dev, "Release 2");
     }
+
+    if (output)
+        input_sync(ts->input_dev);
 
     ts->last_x1 = x1;    
     ts->last_y1 = y1;    
     ts->last_x2 = x2;    
-    ts->last_x2 = y2;    
+    ts->last_y2 = y2;    
     ts->last_numTouches = numTouches;
 }
 
@@ -232,7 +274,7 @@ static void cypress_process_events(struct cypress_ts_data *ts)
     //int value;
 
     if (gpiod_get_value(ts->gpiod_int) || ts->last_numTouches)
-    {   //Only process the TS if something has happened (or ...)
+    {   //Only process the TS if something has happened or a contact in progress
 
         u16 x1,y1,x2,y2;
         u8 rawdata[8];
@@ -247,15 +289,6 @@ static void cypress_process_events(struct cypress_ts_data *ts)
         x2 = rawdata[2] | (rawdata[6] << 8);
         y2 = rawdata[3] | (rawdata[7] << 8);
 
-        /* dev_dbg( &ts->client->dev, ".");
-         * if (x1 || y1)
-         *     dev_dbg( &ts->client->dev, "x1,y1= %d, %d",x1,y1);
-         * if (x2 || y2)
-         *     dev_dbg( &ts->client->dev, "x2,y2= %d, %d",x2,y2);
-
-         * value = gpiod_get_value(ts->gpiod_int);
-         * dev_dbg( &ts->client->dev, "INT= %d\n",value);
-         */
         cypress_ts_process_coords(ts, x1,y1,x2,y2,numTouches);        
     }
 }
@@ -268,11 +301,10 @@ static int cypress_thread(void *arg)
 
     while (!kthread_should_stop())
     {
-        /* 60fps polling */
         struct cypress_ts_data *ts = (struct cypress_ts_data *) arg;
 
-        /* Slowed down for debugging */
-        msleep_interruptible(100); //17
+        /* 60fps polling */
+        msleep_interruptible(ts->requestedRefreshRate); //17
 
         cypress_process_events(ts);
     }
@@ -288,6 +320,7 @@ static int cypress_thread(void *arg)
  * @client: the i2c client
  * @reg:    the starting register
  * @fixed:  a 16 byte array of hte expected data
+ * @returns 0 if ok. -1 data mismatch, -2 can't read data
  */
 static int cypress_check_fixed(struct i2c_client *client, int reg, const u8* fixed)
 {
@@ -317,6 +350,7 @@ static int cypress_check_fixed(struct i2c_client *client, int reg, const u8* fix
  * cypress_i2c_test - I2C test function to check if the device answers.
  *
  * @client: the i2c client
+ * @returns: 0 if ok, -1 or -2 if error
  */
 static int cypress_i2c_test(struct i2c_client *client)
 {
@@ -337,11 +371,7 @@ static int cypress_i2c_test(struct i2c_client *client)
     if (error2)
         error1 = error2;
 
-#if TESTING
-    return 0;   //Assume touchscreen is fitted, even if not.
-#else
     return error1;
-#endif
 }
 
 
@@ -354,10 +384,92 @@ static int cypress_ts_remove(struct i2c_client *client)
     if (ts->gpiod_int)
         devm_gpiod_put(&client->dev, ts->gpiod_int);
 
+	kthread_stop(ts->thread);
+
     return 0;
 }
 
 /////////////////////////////// INITIALISATION /////////////////////////////
+
+
+int32_t commands[] = {
+    -1,     0x0011, -1,     0x0001, -1,     0x00c1, 0x01a8, 0x01b1, 
+    0x0145, 0x0104, 0x00c5, 0x0180, 0x016c, 0x00c6, 0x01bd, 0x0184, 
+    0x00c7, 0x01bd, 0x0184, 0x00bd, 0x0102, 0x0011, -1,     0x0100, 
+    0x0100, 0x0182, 0x0026, 0x0108, 0x00e0, 0x0100, 0x0104, 0x0108, 
+    0x010b, 0x010c, 0x010d, 0x010e, 0x0100, 0x0104, 0x0108, 0x0113, 
+    0x0114, 0x012f, 0x0129, 0x0124, 0x00e1, 0x0100, 0x0104, 0x0108, 
+    0x010b, 0x010c, 0x0111, 0x010d, 0x010e, 0x0100, 0x0104, 0x0108, 
+    0x0113, 0x0114, 0x012f, 0x0129, 0x0124, 0x0026, 0x0108, 0x00fd, 
+    0x0100, 0x0108, 0x0029
+};
+
+
+static void send_bits(struct cypress_ts_data *ts, uint16_t data, uint16_t count)
+{
+    int x;
+    int mask = 1 << (count-1);
+    for(x = 0; x < count; x++){
+        gpiod_set_value(ts->gpiod_mosi,(data & mask) > 0);
+        //bcm2835_gpio_write(MOSI, (data & mask) > 0);
+        data <<= 1;
+
+        gpiod_set_value(ts->gpiod_int, 0);
+        //bcm2835_gpio_write(CLK, LOW);
+
+        udelay(uDELAY);
+        //bcm2835_delayMicroseconds(DELAY);
+
+        gpiod_set_value(ts->gpiod_int, 1);
+        //bcm2835_gpio_write(CLK, HIGH);
+
+        udelay(uDELAY);
+        //bcm2835_delayMicroseconds(DELAY);
+    }
+    gpiod_set_value(ts->gpiod_mosi,0);
+    //bcm2835_gpio_write(MOSI, LOW);
+}
+
+static void write(struct cypress_ts_data *ts, uint16_t command)
+{
+    gpiod_set_value(ts->gpiod_cs,0);
+    //bcm2835_gpio_write(CS, LOW);
+
+    send_bits(ts, command, 9);
+
+    gpiod_set_value(ts->gpiod_cs,1);
+    //bcm2835_gpio_write(CS, HIGH);
+}
+
+static void lcd_init(struct cypress_ts_data *ts)
+{
+#if 1
+    int count;
+    int x;
+    //setup_pins
+
+    gpiod_direction_output(ts->gpiod_cs,1);
+    gpiod_direction_output(ts->gpiod_int,1);    //CLK = output
+    gpiod_direction_output(ts->gpiod_mosi,0);
+
+    //setup_lcd
+    count = sizeof(commands) / sizeof(int32_t);
+    for(x = 0; x < count; x++){
+        int32_t command = commands[x];
+        if(command == -1){
+            mdelay(mWAIT);
+            continue;
+        }
+        write(ts,(uint16_t)command);
+    }
+
+    //cleanup_pins
+    // Return the touch interrupt pin to a usable state
+    gpiod_direction_input(ts->gpiod_int);
+    //bcm2835_gpio_set_pud(CLK, BCM2835_GPIO_PUD_OFF);
+#endif
+}
+
 
 /**
  * cypress_get_gpio_config - Get GPIO config from ACPI/DT
@@ -388,8 +500,33 @@ static int cypress_get_gpio_config(struct cypress_ts_data *ts)
     /* Ensure the correct direction is set because this pin is also used to
      * program the LCD controller
      */
-    gpiod_direction_input(ts->gpiod_int);
     ts->gpiod_int = gpiod;
+    gpiod_direction_input(ts->gpiod_int);
+
+    /* Get the MOSI GPIO pin description */
+    gpiod = devm_gpiod_get(dev, CYPRESS_GPIO_MOSI_NAME, GPIOD_OUT_LOW);
+    if (IS_ERR(gpiod)) {
+        error = PTR_ERR(gpiod);
+        if (error != -EPROBE_DEFER)
+            dev_dbg(dev, "Failed to get %s GPIO: %d\n",
+                CYPRESS_GPIO_MOSI_NAME, error);
+        return error;
+    }
+
+    ts->gpiod_mosi = gpiod;
+
+    /* Get the CS GPIO pin description */
+    gpiod = devm_gpiod_get(dev, CYPRESS_GPIO_CS_NAME, GPIOD_OUT_HIGH);
+    if (IS_ERR(gpiod)) {
+        error = PTR_ERR(gpiod);
+        if (error != -EPROBE_DEFER)
+            dev_dbg(dev, "Failed to get %s GPIO: %d\n",
+                CYPRESS_GPIO_CS_NAME, error);
+        return error;
+    }
+
+    ts->gpiod_cs = gpiod;
+
 
     ts->id = 0x1001;
     ts->version=0x0101;
@@ -399,9 +536,10 @@ static int cypress_get_gpio_config(struct cypress_ts_data *ts)
     ts->abs_x_max = CYPRESS_MAX_WIDTH;
     ts->abs_y_max = CYPRESS_MAX_HEIGHT;
 
-    // X2Y setting
+    // Read DT configuration parameters
     ts->requestedX2Y = device_property_read_bool(&ts->client->dev,
                                 "touchscreen-x2y");
+    dev_dbg(&ts->client->dev, "touchscreen-x2y %u", ts->requestedX2Y);
 
     if(device_property_read_u32(&ts->client->dev, "touchscreen-refresh-rate", &refreshRate))
     {
@@ -440,10 +578,15 @@ static int cypress_get_gpio_config(struct cypress_ts_data *ts)
 
     ts->swapped_x_y = device_property_read_bool(&ts->client->dev,
                             "touchscreen-swapped-x-y");
+    dev_dbg(&ts->client->dev, "touchscreen-swapped-x-y %u", ts->swapped_x_y);
+
     ts->inverted_x = device_property_read_bool(&ts->client->dev,
                            "touchscreen-inverted-x");
+    dev_dbg(&ts->client->dev, "touchscreen-inverted-x %u", ts->inverted_x);
+
     ts->inverted_y = device_property_read_bool(&ts->client->dev,
                            "touchscreen-inverted-y");
+    dev_dbg(&ts->client->dev, "touchscreen-inverted-y %u", ts->inverted_y);
 
     return 0;
 }
@@ -519,22 +662,24 @@ static int cypress_ts_probe(struct i2c_client *client,
         return error;
     }
 
-    cypress_request_input_dev(ts);
 
     cypress_get_gpio_config(ts);
 
-    dev_dbg(&client->dev, "Cypress Cy8c20466 driver installed\n");
+    lcd_init(ts);
+
+    cypress_request_input_dev(ts);
+
+    dev_dbg(&client->dev, "Cypress cy8c20466 driver installed\n");
 
     /* create thread that polls the touch events */
     ts->thread = kthread_run(cypress_thread, ts, "cy82466?");
     if (ts->thread == NULL) {
         dev_err(&client->dev, "Failed to create kernel thread");
-        //err = -ENOMEM;
-        goto out;
+        error = -ENOMEM;
+        return error;
     }
+
     return 0;
-out:
-    return -ENOMEM;
 }
 
 /////////////////////////////// ACPI ///////////////////////////////////////
@@ -561,7 +706,7 @@ static struct i2c_driver cypress_ts_driver = {
     .remove = cypress_ts_remove,
     .id_table = cypress_ts_id,
     .driver = {
-        .name = "Cypress-TS",
+        .name = "cy8c20466-TS",
         .of_match_table = of_match_ptr(cypress_of_match),
     },
 };
