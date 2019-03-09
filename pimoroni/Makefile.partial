@@ -1,0 +1,2 @@
+obj-$(CONFIG_TOUCHSCREEN_PIMHYP3)	+= pimhyp3.o cypress.o
+obj-$(CONFIG_TOUCHSCREEN_PIMHYP4)	+= pimhyp4.o

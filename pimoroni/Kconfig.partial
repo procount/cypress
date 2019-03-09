@@ -1,0 +1,26 @@
+
+config TOUCHSCREEN_PIMHYP3
+	tristate "Cypress I2C touchscreen for Pimoroni Hyperpixel 3.5"
+	depends on I2C
+	depends on GPIOLIB || COMPILE_TEST
+	help
+	  Say Y here if you have the Pimoroni Hyperpixel 3.5 touchscreen
+	  display connected to your system. 
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called pimhyp3.
+	  
+config TOUCHSCREEN_PIMHYP4
+	tristate "Goodix I2C touchscreen for Pimoroni Hyperpixel 4.0"
+	depends on I2C
+	depends on GPIOLIB || COMPILE_TEST
+	help
+	  Say Y here if you have the Pimoroni Hyperpixel 4.0 touchscreen
+	  display connected to your system. 
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called pimhyp4.
